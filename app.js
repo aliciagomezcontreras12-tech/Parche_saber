@@ -89,6 +89,65 @@ async function reloadContent(){
     dbList('simulacros',q=>q.order('created_at',{ascending:false}))
   ]);
   Object.keys(CONCEPT_INDEX).forEach(k=>delete CONCEPT_INDEX[k]);CONCEPTS.forEach(c=>CONCEPT_INDEX[c.id]=c);
+  seedLocalQuestions();
+}
+// Mezcla preguntas incluidas en preguntas_semilla.js (si el archivo está presente) dentro de
+// TOPICS/QUESTIONS en memoria, emparejando por nombre real de materia/grado ya cargados desde
+// Supabase. No escribe nada en la base de datos: son preguntas "de fábrica" que vienen con el
+// código, así que aparecen aunque nadie las haya cargado a Supabase. Seguro llamarlo varias veces
+// (no duplica).
+function seedLocalQuestions(){
+  const seed = window.PARCHE_SABER_SEED_QUESTIONS;
+  if(!seed) return;
+  // Normaliza: minúsculas, sin tildes, sin espacios repetidos.
+  const normTxt = s => String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
+  // Hash estable (FNV-1a): el mismo texto siempre da el mismo id, así el progreso del estudiante
+  // (respuestas, errores, repaso) sigue funcionando después de recargar la página.
+  const hash = str => { let h=0x811c9dc5; for(let i=0;i<str.length;i++){h^=str.charCodeAt(i);h=Math.imul(h,0x01000193)>>>0} return h.toString(36); };
+  function findSubjectId(materiaPdf){
+    const m = normTxt(materiaPdf);
+    let exact = SUBJECTS.find(s=>normTxt(s.name)===m);
+    if(exact) return exact.id;
+    if(m==='lengua castellana'){
+      let lc = SUBJECTS.find(s=>normTxt(s.name).includes('lectura')||normTxt(s.name).includes('lengua'));
+      if(lc) return lc.id;
+    }
+    let partial = SUBJECTS.find(s=>normTxt(s.name).includes(m)||m.includes(normTxt(s.name)));
+    return partial?partial.id:null;
+  }
+  // Acepta "6°", "6º", "6", "Grado 6", "Sexto"...
+  const WORD_GRADES = {sexto:6,septimo:7,octavo:8,noveno:9,decimo:10,undecimo:11,once:11};
+  const gradeNum = label => { const t=normTxt(label); const d=t.match(/\d+/); if(d) return Number(d[0]); for(const w in WORD_GRADES){ if(t.includes(w)) return WORD_GRADES[w]; } return null; };
+  function findGradeId(gradoLabel){
+    const exact = GRADES.find(g=>normTxt(g.name)===normTxt(gradoLabel));
+    if(exact) return exact.id;
+    const n = gradeNum(gradoLabel);
+    if(n===null) return null;
+    const g = GRADES.find(g=>gradeNum(g.name)===n);
+    return g?g.id:null;
+  }
+  Object.keys(seed).forEach(key=>{
+    (seed[key]||[]).forEach(r=>{
+      const subject_id = findSubjectId(r.materia_pdf);
+      const grade_id = findGradeId(r.grado);
+      if(!subject_id||!grade_id) return;
+      let topic = TOPICS.find(t=>t.subject_id===subject_id&&t.grade_id===grade_id&&normTxt(t.title)===normTxt(r.tema));
+      if(!topic){
+        topic = {id:'seed-topic-'+hash(subject_id+'|'+grade_id+'|'+normTxt(r.tema)),subject_id,grade_id,title:r.tema,description:'',content:'',sort_order:0,_seed:true};
+        TOPICS.push(topic);
+      }
+      const optKey = o => (Array.isArray(o)?o:[]).map(normTxt).sort().join('|');
+      const already = QUESTIONS.some(q=>q.subject_id===subject_id&&q.grade_id===grade_id&&normTxt(q.question)===normTxt(r.enunciado)&&optKey(q.options)===optKey(r.opciones));
+      if(already) return;
+      QUESTIONS.push({
+        id:'seed-question-'+hash(subject_id+'|'+grade_id+'|'+normTxt(r.enunciado)+'|'+(r.opciones||[]).join('|')),
+        subject_id, grade_id, topic_id:topic.id,
+        difficulty:r.dificultad, question:r.enunciado, options:r.opciones, correct:r.correcta,
+        why:r.explicacion, why_wrong:r.why_wrong||{}, created_by:'seed-local', image_url:null, deleted_at:null,
+        _seed:true
+      });
+    });
+  });
 }
 async function getSignedUrl(bucket,path){if(!path)return null;const {data,error}=await supabaseClient.storage.from(bucket).createSignedUrl(path,3600);if(error){console.error(error);return null}return data?.signedUrl||null}
 async function loadProfile(userId){const {data,error}=await supabaseClient.from('profiles').select('*').eq('id',userId).maybeSingle();if(error)throw error;if(data)return data;return null}
@@ -124,7 +183,7 @@ async function loadProgress(){if(!CURRENT_USER||CURRENT_USER.role!=='student'){P
 async function saveProgress(){if(!CURRENT_USER||CURRENT_USER.role!=='student')return;const row={user_id:CURRENT_USER.id,grade_id:PROGRESS.grade_id,name:PROGRESS.name,studied_concepts:PROGRESS.studied_concepts,answered:PROGRESS.answered,correct_count:PROGRESS.correct_count,wrong_count:PROGRESS.wrong_count,wrong_ids:PROGRESS.wrong_ids,mastered_questions:PROGRESS.mastered_questions,last_topic:PROGRESS.last_topic,simulacro_history:PROGRESS.simulacro_history,tests_completed:PROGRESS.tests_completed,exams_completed:PROGRESS.exams_completed,visited_sections:PROGRESS.visited_sections,achievements:PROGRESS.achievements,xp:PROGRESS.xp,activity_log:PROGRESS.activity_log,review_attempts:PROGRESS.review_attempts};const {error}=await supabaseClient.from('student_progress').upsert(row,{onConflict:'user_id'});if(error)throw error}
 async function updateProfile(fields){const {data,error}=await supabaseClient.from('profiles').update(fields).eq('id',CURRENT_USER.id).select().single();if(error)throw error;PROFILE=data}
 async function ensureStudentData(){await loadProgress();if(!PROGRESS.grade_id&&PROFILE?.grade_id){PROGRESS.grade_id=PROFILE.grade_id;await saveProgress()}}
-async function syncStudentAnswer(q,chosen,contextType,contextId){const row={user_id:CURRENT_USER.id,question_id:q.id,selected_option:chosen,is_correct:chosen===q.correct,context_type:contextType||null,context_id:contextId||null};const {error}=await supabaseClient.from('student_answers').insert(row);if(error)console.error('student_answers:',error)}
+async function syncStudentAnswer(q,chosen,contextType,contextId){if(q&&q._seed)return;const row={user_id:CURRENT_USER.id,question_id:q.id,selected_option:chosen,is_correct:chosen===q.correct,context_type:contextType||null,context_id:contextId||null};const {error}=await supabaseClient.from('student_answers').insert(row);if(error)console.error('student_answers:',error)}
 function activity(label,icon='✏️'){PROGRESS.activity_log=[{label,icon,date:Date.now()},...(PROGRESS.activity_log||[])].slice(0,20)}
 async function addXP(_amount,reason){if(reason)activity(reason,'📚');try{await saveProgress()}catch(e){console.error('Progreso:',e)}try{await checkAchievements()}catch(e){console.error('Logros:',e)}}
 async function checkAchievements(){let changed=false;for(const a of ACHIEVEMENTS){if(!PROGRESS.achievements[a.id]&&a.check(PROGRESS)){PROGRESS.achievements[a.id]=Date.now();changed=true;activity(`Logro desbloqueado: ${a.title}`,a.icon)}}if(changed){await saveProgress();toast('🏆 Nuevo logro desbloqueado')}}
@@ -133,8 +192,9 @@ function initTheme(){let t;try{t=localStorage.getItem('parche_saber_theme')}catc
 function renderGradeOptions(selected=''){const opts=GRADES.length?GRADES:GRADES_FALLBACK.map((name,i)=>({id:name,name,sort_order:i}));return opts.map(g=>`<option value="${esc(g.id)}" ${g.id===selected?'selected':''}>${esc(g.name)}</option>`).join('')}
 
 const STUDENT_NAV=[['inicio','🏠','Inicio'],['materias','📚','Mis materias'],['repaso','🔁','Repasar errores'],['simulacro','⏱️','Simulacro Saber 11'],['progreso','📈','Progreso'],['logros','🏆','Logros'],['perfil','👤','Perfil']];
-const TEACHER_NAV=[['tInicio','🏠','Inicio'],['tTemas','🧠','Temas'],['tPapelera','🗑️','Papelera'],['tMaterial','📄','Material de aprendizaje'],['tPreguntas','❓','Banco de preguntas'],['tEvaluaciones','📝','Evaluaciones'],['tResultados','📊','Resultados'],['tPerfil','👤','Perfil']];
-function renderNav(){const list=document.getElementById('navList');const nav=CURRENT_USER?.role==='teacher'?TEACHER_NAV:STUDENT_NAV;list.innerHTML=nav.map(([id,icon,label])=>`<button class="navbtn ${id===currentView?'active':''}" data-nav="${id}"><span>${icon}</span>${esc(label)}</button>`).join('');list.querySelectorAll('.navbtn').forEach(b=>b.onclick=()=>guarded(()=>{showView(b.dataset.nav);document.body.classList.remove('sidebar-open');}))}
+const TEACHER_NAV=[['tInicio','🏠','Inicio'],['tTemas','🧠','Temas'],['tMaterial','📄','Material de aprendizaje'],['tPreguntas','❓','Banco de preguntas'],['tEvaluaciones','📝','Evaluaciones'],['tResultados','📊','Resultados'],['tPerfil','👤','Perfil']];
+const ADMIN_NAV=[['aInicio','🏠','Inicio'],['aUsuarios','👥','Usuarios'],['tPerfil','👤','Perfil']];
+function renderNav(){const list=document.getElementById('navList');const nav=CURRENT_USER?.role==='admin'?ADMIN_NAV:CURRENT_USER?.role==='teacher'?TEACHER_NAV:STUDENT_NAV;list.innerHTML=nav.map(([id,icon,label])=>`<button class="navbtn ${id===currentView?'active':''}" data-nav="${id}"><span>${icon}</span>${esc(label)}</button>`).join('');list.querySelectorAll('.navbtn').forEach(b=>b.onclick=()=>guarded(()=>{showView(b.dataset.nav);document.body.classList.remove('sidebar-open');}))}
 function guarded(action){if(examGuard&&examGuard()){confirmBox('¿Salir de la evaluación?','Tus respuestas no enviadas podrían perderse.').then(ok=>{if(ok){examGuard=null;action()}})}else action()}
 function setMobileSidebar(open){
   if(open) { if(window.openMobileSidebar) window.openMobileSidebar(); else document.body.classList.add('sidebar-open'); }
@@ -216,6 +276,18 @@ async function loadPublicRegistrationData(){
     grade.innerHTML='<option value="" selected disabled>Selecciona un grado</option>'+
       GRADES.map(g=>`<option value="${esc(g.id)}">${esc(g.name)}</option>`).join('');
   }
+  const tGrades=document.getElementById('regTeacherGrades');
+  if(tGrades){
+    tGrades.innerHTML=GRADES.map(g=>`<label class="checkbox-opt"><input type="checkbox" value="${esc(g.id)}"> ${esc(g.name)}</label>`).join('');
+  }
+  try{
+    const {data:subs,error:sErr}=await supabaseClient.from('subjects').select('id,name').order('sort_order',{ascending:true});
+    if(!sErr && Array.isArray(subs)){
+      SUBJECTS=subs;
+      const tSubj=document.getElementById('regTeacherSubject');
+      if(tSubj)tSubj.innerHTML='<option value="" selected disabled>Selecciona una materia</option>'+subs.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
+    }
+  }catch(e){console.error('No se pudieron cargar materias para el registro:',e)}
 }
 
 
@@ -293,7 +365,7 @@ function renderFeedback(a,back){
 RENDERERS.testRunner=function(v,p){const t=TESTS.find(x=>x.id===p.id);if(!t){v.innerHTML='<div class="empty-state">Test no encontrado.</div>';return}const s=subjectById(t.subject_id);feedbackState={pool:t.question_ids.map(id=>QUESTIONS.find(q=>q.id===id)).filter(Boolean),idx:0,answers:{},completed:false,mode:'test',meta:{title:t.title,subjectName:s?.name||'',testId:t.id}};renderFeedback(v,()=>showView('subjectHome',{subjectId:t.subject_id,tab:'tests'}));}
 
 function renderDeferred(v,back){const total=deferredState.pool.length;if(!total){v.innerHTML='<div class="empty-state">No hay preguntas en esta evaluación.</div>';return}if(deferredState.finished){renderDeferredResults(v,back);return}const q=deferredState.pool[deferredState.idx];const chosen=deferredState.answers[q.id];v.innerHTML=`<div class="quiz-card"><div class="quiz-meta"><span class="quiz-progress">Pregunta ${deferredState.idx+1} de ${total}</span><span class="tag tag-blue">Evaluación</span></div><div class="pbar" style="margin-top:12px"><div style="width:${Math.round((deferredState.idx+1)/total*100)}%"></div></div><div class="quiz-question">${esc(q.question)}</div><div id="dImage"></div><div id="dOpts"></div><div style="display:flex;justify-content:space-between;gap:8px;margin-top:16px;flex-wrap:wrap"><button class="btn btn-outline btn-sm" id="dPrev" ${deferredState.idx===0?'disabled':''}>← Anterior</button><span class="small muted">${Object.keys(deferredState.answers).length}/${total} respondidas</span>${deferredState.idx===total-1?'<button class="btn btn-primary btn-sm" id="dFinish">Enviar y finalizar</button>':'<button class="btn btn-primary btn-sm" id="dNext">Siguiente →</button>'}</div></div>`;if(q.image_url)signedQuestionImage(q).then(url=>{if(url)v.querySelector('#dImage').innerHTML=`<div class="page-card center"><img src="${esc(url)}" style="max-width:100%;max-height:340px;border-radius:10px" alt="Imagen de la pregunta"></div>`});v.querySelector('#dOpts').innerHTML=(q.options||[]).map((o,i)=>`<button class="qoption ${chosen===i?'selected-deferred':''}" data-i="${i}"><span class="qletter">${String.fromCharCode(65+i)}</span><span>${esc(o)}</span></button>`).join('');v.querySelectorAll('.qoption').forEach(b=>b.onclick=()=>{deferredState.answers[q.id]=Number(b.dataset.i);renderDeferred(v,back)});v.querySelector('#dPrev').onclick=()=>{if(deferredState.idx>0){deferredState.idx--;renderDeferred(v,back)}};if(v.querySelector('#dNext'))v.querySelector('#dNext').onclick=()=>{deferredState.idx++;renderDeferred(v,back)};if(v.querySelector('#dFinish'))v.querySelector('#dFinish').onclick=async()=>finishDeferred(v,back)}
-async function finishDeferred(v,back){const unanswered=deferredState.pool.filter(q=>deferredState.answers[q.id]===undefined).length;if(unanswered){notify('Faltan respuestas',`Todavía tienes ${unanswered} pregunta(s) sin responder.`,'warning');return}let correct=0;const bySubject={};const answerRows=[];for(const q of deferredState.pool){const chosen=deferredState.answers[q.id];const ok=chosen===q.correct;if(ok)correct++;if(!bySubject[q.subject_id])bySubject[q.subject_id]={correct:0,total:0};bySubject[q.subject_id].total++;if(ok)bySubject[q.subject_id].correct++;answerRows.push({question_id:q.id,selected_option:chosen,is_correct:ok})}const total=deferredState.pool.length;const pct=Math.round(correct/total*100);for(const row of answerRows){if(PROGRESS.answered[row.question_id]===undefined){PROGRESS.answered[row.question_id]=row.selected_option;if(row.is_correct)PROGRESS.correct_count++;else{PROGRESS.wrong_count++;PROGRESS.wrong_ids[row.question_id]=true}}}await saveProgress();await supabaseClient.from('student_answers').insert(answerRows.map(r=>({...r,user_id:CURRENT_USER.id,context_type:deferredState.mode,context_id:deferredState.meta.examId||null})));const record={score:correct,total,percentage:pct,by_subject:bySubject,answers:deferredState.answers};if(deferredState.mode==='simulacro'){PROGRESS.simulacro_history=[...(PROGRESS.simulacro_history||[]),{date:Date.now(),score:correct,total,pct,bySubject}];await addXP(30+Math.round(pct/5),'Simulacro completado')}else{PROGRESS.exams_completed[deferredState.meta.examId]=record;await supabaseClient.from('exam_attempts').insert({user_id:CURRENT_USER.id,exam_id:deferredState.meta.examId,score:correct,total,percentage:pct,by_subject:bySubject,answers:deferredState.answers});await addXP(25+Math.round(pct/4),'Examen completado')}deferredState.finished=true;examGuard=null;await saveProgress();await checkAchievements();renderDeferredResults(v,back)}
+async function finishDeferred(v,back){const unanswered=deferredState.pool.filter(q=>deferredState.answers[q.id]===undefined).length;if(unanswered){notify('Faltan respuestas',`Todavía tienes ${unanswered} pregunta(s) sin responder.`,'warning');return}let correct=0;const bySubject={};const answerRows=[];for(const q of deferredState.pool){const chosen=deferredState.answers[q.id];const ok=chosen===q.correct;if(ok)correct++;if(!bySubject[q.subject_id])bySubject[q.subject_id]={correct:0,total:0};bySubject[q.subject_id].total++;if(ok)bySubject[q.subject_id].correct++;answerRows.push({question_id:q.id,selected_option:chosen,is_correct:ok})}const total=deferredState.pool.length;const pct=Math.round(correct/total*100);for(const row of answerRows){if(PROGRESS.answered[row.question_id]===undefined){PROGRESS.answered[row.question_id]=row.selected_option;if(row.is_correct)PROGRESS.correct_count++;else{PROGRESS.wrong_count++;PROGRESS.wrong_ids[row.question_id]=true}}}await saveProgress();await supabaseClient.from('student_answers').insert(answerRows.filter(r=>!String(r.question_id).startsWith('seed-')).map(r=>({...r,user_id:CURRENT_USER.id,context_type:deferredState.mode,context_id:deferredState.meta.examId||null})));const record={score:correct,total,percentage:pct,by_subject:bySubject,answers:deferredState.answers};if(deferredState.mode==='simulacro'){PROGRESS.simulacro_history=[...(PROGRESS.simulacro_history||[]),{date:Date.now(),score:correct,total,pct,bySubject}];await addXP(30+Math.round(pct/5),'Simulacro completado')}else{PROGRESS.exams_completed[deferredState.meta.examId]=record;await supabaseClient.from('exam_attempts').insert({user_id:CURRENT_USER.id,exam_id:deferredState.meta.examId,score:correct,total,percentage:pct,by_subject:bySubject,answers:deferredState.answers});await addXP(25+Math.round(pct/4),'Examen completado')}deferredState.finished=true;examGuard=null;await saveProgress();await checkAchievements();renderDeferredResults(v,back)}
 function renderDeferredResults(v,back){let correct=0;for(const q of deferredState.pool)if(deferredState.answers[q.id]===q.correct)correct++;const total=deferredState.pool.length;const pct=total?Math.round(correct/total*100):0;v.innerHTML=`<div class="page-card center"><h2>🎉 Resultados</h2><div class="grid cols-3"><div class="stat-card"><div class="sval">${correct}/${total}</div><div class="slabel">Correctas</div></div><div class="stat-card"><div class="sval">${pct}%</div><div class="slabel">Puntaje</div></div><div class="stat-card"><div class="sval">${total-correct}</div><div class="slabel">Incorrectas</div></div></div><div style="margin-top:16px;display:flex;justify-content:center;gap:8px;flex-wrap:wrap"><button class="btn btn-primary btn-sm" id="again">Intentar de nuevo</button><button class="btn btn-outline btn-sm" id="back">Volver</button><button class="btn btn-ghost btn-sm" id="rev">Repasar mis errores</button></div></div>`;v.querySelector('#again').onclick=()=>{deferredState.answers={};deferredState.idx=0;deferredState.finished=false;examGuard=()=>Object.keys(deferredState.answers).length>0;renderDeferred(v,back)};v.querySelector('#back').onclick=back;v.querySelector('#rev').onclick=()=>showView('repaso')}
 RENDERERS.examRunner=function(v,p){const e=EXAMS.find(x=>x.id===p.id);if(!e){v.innerHTML='<div class="empty-state">Examen no encontrado.</div>';return}deferredState={pool:e.question_ids.map(id=>QUESTIONS.find(q=>q.id===id)).filter(Boolean),idx:0,answers:{},mode:'exam',meta:{title:e.title,examId:e.id},finished:false};examGuard=()=>Object.keys(deferredState.answers).length>0;renderDeferred(v,()=>showView('subjectHome',{subjectId:e.subject_id,tab:'examenes'}))}
 
@@ -543,6 +615,7 @@ document.getElementById('modalBackdrop').onclick=e=>{if(e.target.id==='modalBack
     try{await checkAchievements()}catch(e){console.error('Logros:',e)}
   }
   async function syncStudentAnswer(q,chosen,contextType,contextId){
+    if(q&&q._seed)return; // preguntas de fábrica: viven en el código, no en la tabla questions
     try{
       const {error}=await supabaseClient.from('student_answers').insert({user_id:CURRENT_USER.id,question_id:q.id,selected_option:chosen,is_correct:chosen===q.correct,context_type:contextType||null,context_id:contextId||null});
       if(error)throw error;
@@ -559,7 +632,13 @@ document.getElementById('modalBackdrop').onclick=e=>{if(e.target.id==='modalBack
     const requestedRole=meta.role==='teacher'?'teacher':'student';
     if(!p){
       const row={id:user.id,name:fullName||[first,last].filter(Boolean).join(' ')||user.email?.split('@')[0]||'Usuario',role:requestedRole,grade_id:requestedRole==='student'?(meta.grade_id||null):null,section:requestedRole==='student'?(SECTIONS.includes(meta.section)?meta.section:null):null,first_name:first||null,last_name:last||null};
-      const {data,error}=await supabaseClient.from('profiles').insert(row).select().single();
+      if(requestedRole==='teacher'){row.teacher_subject_id=meta.teacher_subject_id||null;row.teacher_grades=Array.isArray(meta.teacher_grades)?meta.teacher_grades:[];row.teacher_sections=Array.isArray(meta.teacher_sections)?meta.teacher_sections:[];row.approved=false}
+      let {data,error}=await supabaseClient.from('profiles').insert(row).select().single();
+      if(error && requestedRole==='teacher' && /teacher_subject_id|teacher_grades|teacher_sections|approved|column/i.test(error.message||'')){
+        console.error('Faltan columnas teacher_subject_id/teacher_grades/teacher_sections/approved en profiles, reintentando sin ellas:',error);
+        delete row.teacher_subject_id;delete row.teacher_grades;delete row.teacher_sections;delete row.approved;
+        ({data,error}=await supabaseClient.from('profiles').insert(row).select().single());
+      }
       if(error)throw error;
       return data;
     }
@@ -577,7 +656,25 @@ document.getElementById('modalBackdrop').onclick=e=>{if(e.target.id==='modalBack
     try{
       CURRENT_USER=user;
       PROFILE=await ensureProfile(user);
-      CURRENT_USER.role=PROFILE?.role==='teacher'?'teacher':'student';
+      CURRENT_USER.role=PROFILE?.role==='teacher'?'teacher':PROFILE?.role==='admin'?'admin':'student';
+      if(PROFILE?.disabled){
+        await supabaseClient.auth.signOut();
+        CURRENT_USER=null;PROFILE=null;PROGRESS=defaultProgress();
+        document.getElementById('app').classList.add('hidden');
+        document.getElementById('authScreen').classList.remove('hidden');
+        document.body.classList.add('auth-active');
+        const x=document.getElementById('loginError');if(x)x.innerHTML='<div class="auth-error">Tu cuenta fue deshabilitada. Contacta a un administrador.</div>';
+        return;
+      }
+      if(CURRENT_USER.role==='teacher'&&PROFILE?.approved===false){
+        await supabaseClient.auth.signOut();
+        CURRENT_USER=null;PROFILE=null;PROGRESS=defaultProgress();
+        document.getElementById('app').classList.add('hidden');
+        document.getElementById('authScreen').classList.remove('hidden');
+        document.body.classList.add('auth-active');
+        const x=document.getElementById('loginError');if(x)x.innerHTML='<div class="auth-error">Tu cuenta de docente está pendiente de aprobación por un administrador. Vuelve a intentar más tarde.</div>';
+        return;
+      }
       if(CURRENT_USER.role==='student'){await ensureStudentData();if(PROFILE?.grade_id)PROGRESS.grade_id=PROFILE.grade_id;}else PROGRESS=defaultProgress();
       await reloadContent();
       document.getElementById('authScreen').classList.add('hidden');
@@ -587,8 +684,9 @@ document.getElementById('modalBackdrop').onclick=e=>{if(e.target.id==='modalBack
       renderNav();
       let route=routeOverride,params={};
       if(!route){try{route=sessionStorage.getItem(V4_ROUTE_KEY)||null;params=JSON.parse(sessionStorage.getItem(V4_PARAMS_KEY)||'{}')}catch{}}
-      if(CURRENT_USER.role==='teacher')route=route?.startsWith('t')?route:'tInicio';
-      else route=route&&!route.startsWith('t')?route:'inicio';
+      if(CURRENT_USER.role==='admin')route=route&&route.startsWith('a')?route:'aInicio';
+      else if(CURRENT_USER.role==='teacher')route=route?.startsWith('t')?route:'tInicio';
+      else route=route&&!route.startsWith('t')&&!route.startsWith('a')?route:'inicio';
       showView(route||'inicio',params);
     }catch(e){
       console.error('loginUser:',e);
@@ -634,7 +732,7 @@ document.getElementById('modalBackdrop').onclick=e=>{if(e.target.id==='modalBack
     initTheme();
     document.getElementById('tabLogin').onclick=()=>setAuthMode('login');
     document.getElementById('tabRegister').onclick=()=>setAuthMode('register');
-    document.querySelectorAll('.role-opt').forEach(b=>b.onclick=()=>{document.querySelectorAll('.role-opt').forEach(x=>x.classList.remove('active'));b.classList.add('active');regRole=b.dataset.role;document.getElementById('studentRegisterFields')?.classList.toggle('hidden',regRole!=='student')});
+    document.querySelectorAll('.role-opt').forEach(b=>b.onclick=()=>{document.querySelectorAll('.role-opt').forEach(x=>x.classList.remove('active'));b.classList.add('active');regRole=b.dataset.role;document.getElementById('studentRegisterFields')?.classList.toggle('hidden',regRole!=='student');document.getElementById('teacherRegisterFields')?.classList.toggle('hidden',regRole!=='teacher')});
     const form=document.getElementById('registerForm');
     if(!document.getElementById('termsCheck'))form?.insertAdjacentHTML('beforeend',`<label class="small" style="display:flex;gap:8px;align-items:flex-start;margin:8px 0"><input type="checkbox" id="termsCheck" style="width:auto;margin-top:4px"><span>Acepto que la aplicación use mis datos académicos para mostrar mi progreso.</span></label><button type="button" class="btn btn-ghost btn-sm" id="termsBtn">Ver información</button>`);
     document.getElementById('termsBtn')?.addEventListener('click',showTerms);
@@ -642,13 +740,13 @@ document.getElementById('modalBackdrop').onclick=e=>{if(e.target.id==='modalBack
     setupPasswordToggles();
     document.getElementById('regPassword')?.addEventListener('input',e=>{const hint=document.getElementById('regPasswordHint');const ok=validPassword(e.target.value);if(hint){hint.textContent=ok?'✓ Contraseña segura.':'Mínimo 8 caracteres, una mayúscula, una minúscula y un número.';hint.style.color=ok?'var(--ok)':'var(--ink-soft)'}});
     document.getElementById('loginForm').onsubmit=async e=>{e.preventDefault();const box=document.getElementById('loginError');box.innerHTML='';const btn=e.currentTarget.querySelector('button[type="submit"]');btn.disabled=true;try{const email=document.getElementById('loginEmail').value.trim();const password=document.getElementById('loginPassword').value;if(!email||!password)throw new Error('missing');const {data,error}=await supabaseClient.auth.signInWithPassword({email,password});if(error)throw error;if(!data.user)throw new Error('missing-user');if(!data.user.email_confirmed_at && !shouldSkipEmailConfirmation()){await supabaseClient.auth.signOut();notify('Correo sin verificar','Debes confirmar tu correo electrónico antes de usar Parche Saber. Revisa tu bandeja de entrada.','warning');return}await loginUser(data.user)}catch(err){console.error('Login:',err);box.innerHTML=`<div class="auth-error">${esc(userFriendlyError(err,'Correo o contraseña incorrectos.'))}</div>`}finally{btn.disabled=false}};
-    document.getElementById('registerForm').onsubmit=async e=>{e.preventDefault();const box=document.getElementById('registerError');box.innerHTML='';const btn=e.currentTarget.querySelector('button[type="submit"]');btn.disabled=true;try{const name=document.getElementById('regName').value.trim();const lastName=document.getElementById('regLastName').value.trim();const email=document.getElementById('regEmail').value.trim();const password=document.getElementById('regPassword').value;const terms=document.getElementById('termsCheck')?.checked;if(!terms)throw new Error('terms');if(!name)throw new Error('Completa tu nombre para continuar.');if(!lastName)throw new Error('Completa tu apellido para continuar.');if(!validPersonName(name))throw new Error('El nombre solo puede contener letras y espacios.');if(!validPersonName(lastName))throw new Error('El apellido solo puede contener letras y espacios.');if(name.length>40||lastName.length>40)throw new Error('El nombre y el apellido pueden tener máximo 40 caracteres cada uno.');if(!email)throw new Error('Completa tu correo para continuar.');if(!validPassword(password))throw new Error('La contraseña debe tener mínimo 8 caracteres, una mayúscula, una minúscula y un número.');const grade_id=regRole==='student'?document.getElementById('regGrade').value:null;const section=regRole==='student'?document.getElementById('regSection').value:null;if(regRole==='student'&&(!grade_id||!SECTIONS.includes(section)))throw new Error('Selecciona un grado y una sección válida.');const fullName=`${name} ${lastName}`.trim();const {data,error}=await supabaseClient.auth.signUp({email,password,options:{data:{name:fullName,first_name:name,last_name:lastName,role:regRole,grade_id,section}}});if(error)throw error;if(!data.user)throw new Error('No se pudo crear la cuenta.');if((data.session&&data.user.email_confirmed_at) || (data.session && shouldSkipEmailConfirmation())){await loginUser(data.user,'inicio')}else{notify('Cuenta creada','Te enviamos un correo de confirmación. Confirma tu correo antes de iniciar sesión.','success');setAuthMode('login')}}catch(err){console.error('Registro:',err);const msg=String(err?.message||'');box.innerHTML=`<div class="auth-error">${esc(msg==='terms'?'Debes aceptar la información de privacidad para crear la cuenta.':userFriendlyError(err,'No se pudo crear la cuenta.'))}</div>`}finally{btn.disabled=false}};
+    document.getElementById('registerForm').onsubmit=async e=>{e.preventDefault();const box=document.getElementById('registerError');box.innerHTML='';const btn=e.currentTarget.querySelector('button[type="submit"]');btn.disabled=true;try{const name=document.getElementById('regName').value.trim();const lastName=document.getElementById('regLastName').value.trim();const email=document.getElementById('regEmail').value.trim();const password=document.getElementById('regPassword').value;const terms=document.getElementById('termsCheck')?.checked;if(!terms)throw new Error('terms');if(!name)throw new Error('Completa tu nombre para continuar.');if(!lastName)throw new Error('Completa tu apellido para continuar.');if(!validPersonName(name))throw new Error('El nombre solo puede contener letras y espacios.');if(!validPersonName(lastName))throw new Error('El apellido solo puede contener letras y espacios.');if(name.length>40||lastName.length>40)throw new Error('El nombre y el apellido pueden tener máximo 40 caracteres cada uno.');if(!email)throw new Error('Completa tu correo para continuar.');if(!validPassword(password))throw new Error('La contraseña debe tener mínimo 8 caracteres, una mayúscula, una minúscula y un número.');const grade_id=regRole==='student'?document.getElementById('regGrade').value:null;const section=regRole==='student'?document.getElementById('regSection').value:null;if(regRole==='student'&&(!grade_id||!SECTIONS.includes(section)))throw new Error('Selecciona un grado y una sección válida.');let teacher_subject_id=null,teacher_grades=[],teacher_sections=[];if(regRole==='teacher'){teacher_subject_id=document.getElementById('regTeacherSubject').value;teacher_grades=Array.from(document.querySelectorAll('#regTeacherGrades input:checked')).map(i=>i.value);teacher_sections=Array.from(document.querySelectorAll('#teacherRegisterFields .field:last-child input:checked')).map(i=>i.value);if(!teacher_subject_id)throw new Error('Selecciona la materia que enseñas.');if(!teacher_grades.length)throw new Error('Selecciona al menos un grado que manejas.');if(!teacher_sections.length)throw new Error('Selecciona al menos una sección que manejas.')}const fullName=`${name} ${lastName}`.trim();const {data,error}=await supabaseClient.auth.signUp({email,password,options:{data:{name:fullName,first_name:name,last_name:lastName,role:regRole,grade_id,section,teacher_subject_id,teacher_grades,teacher_sections}}});if(error)throw error;if(!data.user)throw new Error('No se pudo crear la cuenta.');if((data.session&&data.user.email_confirmed_at) || (data.session && shouldSkipEmailConfirmation())){await loginUser(data.user,'inicio')}else{notify('Cuenta creada','Te enviamos un correo de confirmación. Confirma tu correo antes de iniciar sesión.','success');setAuthMode('login')}}catch(err){console.error('Registro:',err);const msg=String(err?.message||'');box.innerHTML=`<div class="auth-error">${esc(msg==='terms'?'Debes aceptar la información de privacidad para crear la cuenta.':userFriendlyError(err,'No se pudo crear la cuenta.'))}</div>`}finally{btn.disabled=false}};
     supabaseClient.auth.onAuthStateChange((event,session)=>{if(event==='SIGNED_OUT'){CURRENT_USER=null;PROFILE=null;document.body.classList.add('auth-active');return}if(session?.user&&!CURRENT_USER&&(session.user.email_confirmed_at || shouldSkipEmailConfirmation()))setTimeout(()=>loginUser(session.user),0)});
     supabaseClient.auth.getSession().then(({data})=>{if(data.session?.user&&(data.session.user.email_confirmed_at || shouldSkipEmailConfirmation()))loginUser(data.session.user);else if(data.session?.user&&!data.session.user.email_confirmed_at&&!shouldSkipEmailConfirmation())supabaseClient.auth.signOut()}).catch(e=>console.error(e));
   }
 
   function shouldSkipEmailConfirmation(){const host=window.location.hostname;return window.location.protocol==='file:'||host==='localhost'||host==='127.0.0.1';}
-  function setTheme(theme){const safe=theme==='dark'?'dark':'light';document.documentElement.setAttribute('data-theme',safe);const b=document.getElementById('themeBtn');if(b)b.textContent=safe==='dark'?'Tema: Claro':'Tema: Oscuro';try{localStorage.setItem('parche_saber_theme',safe)}catch{}}
+  function setTheme(theme){const safe=theme==='dark'?'dark':'light';document.documentElement.setAttribute('data-theme',safe);const b=document.getElementById('themeBtn');if(b)b.textContent=safe==='dark'?'Tema: Claro':'Tema: Oscuro';const pl=document.getElementById('publicThemeLabel');if(pl)pl.textContent=safe==='dark'?'Oscuro':'Claro';const pi=document.querySelector('#publicThemeBtn .theme-switch-icon');if(pi)pi.textContent=safe==='dark'?'☾':'☼';try{localStorage.setItem('parche_saber_theme',safe)}catch{}}
   function initTheme(){let saved=null;try{saved=localStorage.getItem('parche_saber_theme')}catch{};const prefersDark=window.matchMedia?.('(prefers-color-scheme: dark)').matches;setTheme(saved||(prefersDark?'dark':'light'))}
 
   // ---- Student content with strict grade filtering.
@@ -677,7 +775,7 @@ document.getElementById('modalBackdrop').onclick=e=>{if(e.target.id==='modalBack
   function buildDeferredPool(ids){return ids.map(id=>QUESTIONS.find(q=>q.id===id)).filter(Boolean)}
   function startDeferred(pool,mode,meta,timeSeconds){deferredState={pool,idx:0,answers:{},mode,meta,finished:false,endAt:timeSeconds?Date.now()+timeSeconds*1000:null};examGuard=()=>!deferredState.finished&&Object.keys(deferredState.answers).length>0;}
   function renderDeferredV4(v,back){const total=deferredState.pool.length;if(!total){v.innerHTML='<div class="empty-state">No hay preguntas disponibles.</div>';return}if(deferredState.finished){renderDeferredResultsV4(v,back);return}if(deferredState.endAt&&Date.now()>=deferredState.endAt){finishDeferredV4(v,back,true);return}const q=deferredState.pool[deferredState.idx],chosen=deferredState.answers[q.id],left=deferredState.endAt?Math.max(0,Math.ceil((deferredState.endAt-Date.now())/1000)):null;v.innerHTML=`<div class="quiz-card"><div class="quiz-meta"><span class="quiz-progress">Pregunta ${deferredState.idx+1} de ${total}</span>${left!==null?`<span id="simTimer" class="timer-chip ${left<300?'warning':''}">${formatTime(left)}</span>`:''}</div><div class="pbar"><div style="width:${Math.round((deferredState.idx+1)/total*100)}%"></div></div><div class="quiz-question">${esc(q.question)}</div><div id="dImage"></div><div id="dOpts"></div><div style="display:flex;justify-content:space-between;gap:8px;margin-top:16px;flex-wrap:wrap"><button class="btn btn-outline btn-sm" id="dPrev" ${deferredState.idx===0?'disabled':''}>← Anterior</button><span class="small muted">${Object.keys(deferredState.answers).length}/${total} respondidas</span>${deferredState.idx===total-1?'<button class="btn btn-primary btn-sm" id="dFinish">Enviar y finalizar</button>':'<button class="btn btn-primary btn-sm" id="dNext">Siguiente →</button>'}</div></div>`;if(q.image_url)signedQuestionImage(q).then(url=>{if(url)v.querySelector('#dImage').innerHTML=`<div class="page-card center"><img src="${esc(url)}" alt="Imagen de la pregunta" style="max-width:100%;max-height:340px;border-radius:10px"></div>`});v.querySelector('#dOpts').innerHTML=(q.options||[]).map((o,i)=>`<button class="qoption ${chosen===i?'selected-deferred':''}" data-i="${i}"><span class="qletter">${String.fromCharCode(65+i)}</span><span>${esc(o)}</span></button>`).join('');v.querySelectorAll('.qoption').forEach(b=>b.onclick=()=>{deferredState.answers[q.id]=Number(b.dataset.i);renderDeferredV4(v,back)});v.querySelector('#dPrev').onclick=()=>{if(deferredState.idx>0){deferredState.idx--;renderDeferredV4(v,back)}};if(v.querySelector('#dNext'))v.querySelector('#dNext').onclick=()=>{deferredState.idx++;renderDeferredV4(v,back)};if(v.querySelector('#dFinish'))v.querySelector('#dFinish').onclick=()=>finishDeferredV4(v,back,false);clearSimTimer();if(deferredState.endAt){simTimer=setInterval(()=>{const el=v.querySelector('#simTimer');const l=Math.max(0,Math.ceil((deferredState.endAt-Date.now())/1000));if(el){el.textContent=formatTime(l);el.classList.toggle('warning',l<300)}if(l<=0){clearSimTimer();finishDeferredV4(v,back,true)}},1000)}}
-  async function finishDeferredV4(v,back,timeExpired=false){clearSimTimer();const unanswered=deferredState.pool.filter(q=>deferredState.answers[q.id]===undefined).length;if(unanswered&&!timeExpired){v4Toast(`Todavía tienes ${unanswered} pregunta(s) sin responder.`,'error');return}let correct=0;const bySubject={};const answers={...deferredState.answers};const answerRows=[];for(const q of deferredState.pool){const chosen=answers[q.id];const ok=chosen!==undefined&&chosen===q.correct;if(ok)correct++;if(!bySubject[q.subject_id])bySubject[q.subject_id]={correct:0,total:0};bySubject[q.subject_id].total++;if(ok)bySubject[q.subject_id].correct++;if(chosen!==undefined)answerRows.push({user_id:CURRENT_USER.id,question_id:q.id,selected_option:chosen,is_correct:ok,context_type:deferredState.mode,context_id:deferredState.meta.examId||deferredState.meta.simId||null})}const total=deferredState.pool.length,pct=total?Math.round(correct/total*100):0;for(const row of answerRows){if(PROGRESS.answered[row.question_id]===undefined){PROGRESS.answered[row.question_id]=row.selected_option;if(row.is_correct)PROGRESS.correct_count=(PROGRESS.correct_count||0)+1;else{PROGRESS.wrong_count=(PROGRESS.wrong_count||0)+1;PROGRESS.wrong_ids[row.question_id]=true}}}await saveProgressSafe();try{if(answerRows.length)await supabaseClient.from('student_answers').insert(answerRows)}catch(e){console.error(e)}const record={date:Date.now(),score:correct,total,pct,percentage:pct,bySubject,answers,title:deferredState.meta.title,mode:deferredState.meta.mode||deferredState.mode,size:total,timeExpired};if(deferredState.mode==='simulacro'){PROGRESS.simulacro_history=[...(PROGRESS.simulacro_history||[]),record]}else{PROGRESS.exams_completed[deferredState.meta.examId]=record;try{await supabaseClient.from('exam_attempts').insert({user_id:CURRENT_USER.id,exam_id:deferredState.meta.examId,score:correct,total,percentage:pct,by_subject:bySubject,answers})}catch(e){console.error(e)}}deferredState.finished=true;examGuard=null;await saveProgressSafe();await checkAchievementsSafe();renderDeferredResultsV4(v,back)}
+  async function finishDeferredV4(v,back,timeExpired=false){clearSimTimer();const unanswered=deferredState.pool.filter(q=>deferredState.answers[q.id]===undefined).length;if(unanswered&&!timeExpired){v4Toast(`Todavía tienes ${unanswered} pregunta(s) sin responder.`,'error');return}let correct=0;const bySubject={};const answers={...deferredState.answers};const answerRows=[];for(const q of deferredState.pool){const chosen=answers[q.id];const ok=chosen!==undefined&&chosen===q.correct;if(ok)correct++;if(!bySubject[q.subject_id])bySubject[q.subject_id]={correct:0,total:0};bySubject[q.subject_id].total++;if(ok)bySubject[q.subject_id].correct++;if(chosen!==undefined)answerRows.push({user_id:CURRENT_USER.id,question_id:q.id,selected_option:chosen,is_correct:ok,context_type:deferredState.mode,context_id:deferredState.meta.examId||deferredState.meta.simId||null})}const total=deferredState.pool.length,pct=total?Math.round(correct/total*100):0;for(const row of answerRows){if(PROGRESS.answered[row.question_id]===undefined){PROGRESS.answered[row.question_id]=row.selected_option;if(row.is_correct)PROGRESS.correct_count=(PROGRESS.correct_count||0)+1;else{PROGRESS.wrong_count=(PROGRESS.wrong_count||0)+1;PROGRESS.wrong_ids[row.question_id]=true}}}await saveProgressSafe();try{const dbRows=answerRows.filter(r=>!String(r.question_id).startsWith('seed-'));if(dbRows.length)await supabaseClient.from('student_answers').insert(dbRows)}catch(e){console.error(e)}const record={date:Date.now(),score:correct,total,pct,percentage:pct,bySubject,answers,title:deferredState.meta.title,mode:deferredState.meta.mode||deferredState.mode,size:total,timeExpired};if(deferredState.mode==='simulacro'){PROGRESS.simulacro_history=[...(PROGRESS.simulacro_history||[]),record]}else{PROGRESS.exams_completed[deferredState.meta.examId]=record;try{await supabaseClient.from('exam_attempts').insert({user_id:CURRENT_USER.id,exam_id:deferredState.meta.examId,score:correct,total,percentage:pct,by_subject:bySubject,answers})}catch(e){console.error(e)}}deferredState.finished=true;examGuard=null;await saveProgressSafe();await checkAchievementsSafe();renderDeferredResultsV4(v,back)}
   function renderDeferredResultsV4(v,back){const total=deferredState.pool.length,correct=deferredState.pool.filter(q=>deferredState.answers[q.id]===q.correct).length,pct=total?Math.round(correct/total*100):0;v.innerHTML=`<div class="page-card center"><h2>🎉 Resultados</h2><p class="muted">${esc(deferredState.meta.title||'Evaluación')} · ${esc(deferredState.meta.mode||'Evaluación')}</p><div class="grid cols-3"><div class="stat-card"><div class="sval">${correct}/${total}</div><div class="slabel">Correctas</div></div><div class="stat-card"><div class="sval">${pct}%</div><div class="slabel">Aciertos</div></div><div class="stat-card"><div class="sval">${total-correct}</div><div class="slabel">Incorrectas</div></div></div><p class="small muted">${deferredState.meta.timeExpired?'El tiempo terminó. Se calificaron las respuestas registradas.':'Evaluación enviada correctamente.'}</p><div style="display:flex;justify-content:center;gap:8px;flex-wrap:wrap"><button class="btn btn-primary btn-sm" id="again">Intentar de nuevo</button><button class="btn btn-outline btn-sm" id="back">Volver</button><button class="btn btn-ghost btn-sm" id="rev">Repasar mis errores</button></div></div>`;v.querySelector('#again').onclick=()=>{startDeferred(deferredState.pool.slice(),deferredState.mode,deferredState.meta,deferredState.meta.durationSec);renderDeferredV4(v,back)};v.querySelector('#back').onclick=back;v.querySelector('#rev').onclick=()=>showView('repaso')}
   RENDERERS.examRunner=function(v,p){const e=EXAMS.find(x=>x.id===p.id);if(!e){v.innerHTML='<div class="empty-state">Examen no encontrado o no disponible.</div>';return}const pool=buildDeferredPool(e.question_ids).filter(q=>q.grade_id===PROFILE?.grade_id);startDeferred(pool,'exam',{title:e.title,examId:e.id,mode:'Examen'},null);renderDeferredV4(v,()=>showView('subjectHome',{subjectId:e.subject_id,tab:'examenes'}))}
 
@@ -717,7 +815,7 @@ document.getElementById('modalBackdrop').onclick=e=>{if(e.target.id==='modalBack
 
   // ---- Docente: temas, materiales, preguntas, evaluaciones, resultados.
   RENDERERS.tInicio=function(v){
-    v.innerHTML=`<div class="breadcrumb">Panel docente</div><h1>¡Hola, ${esc(PROFILE?.name||'profe')}! 👩‍🏫</h1><p class="muted">Administra contenido por materia y grado.</p><div class="grid cols-4"><div class="stat-card"><div class="sval">${SUBJECTS.length}</div><div class="slabel">Materias</div></div><div class="stat-card"><div class="sval">${QUESTIONS.length}</div><div class="slabel">Preguntas</div></div><div class="stat-card"><div class="sval">${TESTS.length+EXAMS.length}</div><div class="slabel">Evaluaciones</div></div><div class="stat-card"><div class="sval">${TOPICS.length}</div><div class="slabel">Temas</div></div></div><div class="page-card" style="margin-top:16px"><span class="section-eyebrow">Estudiantes por grado y sección</span><div id="teacherStudentStats" class="table-wrap"><span class="small muted">Cargando…</span></div></div><div class="grid cols-2"><div class="page-card"><span class="section-eyebrow">Accesos rápidos</span><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-outline" onclick="showView('tTemas')">🧠 Temas</button><button class="btn btn-outline" onclick="showView('tPreguntas')">❓ Preguntas</button><button class="btn btn-outline" onclick="showView('tMaterial')">📄 Material</button><button class="btn btn-outline" onclick="showView('tEvaluaciones')">📝 Evaluaciones</button><button class="btn btn-outline" onclick="showView('tResultados')">📊 Resultados</button></div></div><div class="page-card"><span class="section-eyebrow">Importante</span><p class="small muted">Todo lo que publiques debe tener un grado asignado para que llegue al grupo correcto.</p></div></div>`;
+    v.innerHTML=`<div class="breadcrumb">Panel docente</div><h1>¡Hola, ${esc(PROFILE?.name||'profe')}! 👩‍🏫</h1><p class="muted">Administra contenido por materia y grado.</p><div class="grid cols-4"><div class="stat-card"><div class="sval">${SUBJECTS.length}</div><div class="slabel">Materias</div></div><div class="stat-card"><div class="sval">${QUESTIONS.length}</div><div class="slabel">Preguntas</div></div><div class="stat-card"><div class="sval">${TESTS.length+EXAMS.length}</div><div class="slabel">Evaluaciones</div></div><div class="stat-card"><div class="sval">${TOPICS.length}</div><div class="slabel">Temas</div></div></div><div class="page-card" style="margin-top:16px"><span class="section-eyebrow">Estudiantes por grado y sección</span><div id="teacherStudentStats" class="table-wrap"><span class="small muted">Cargando…</span></div></div><div class="grid cols-2"><div class="page-card"><span class="section-eyebrow">Accesos rápidos</span><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-outline" onclick="showView('tTemas')">🧠 Temas</button><button class="btn btn-outline" onclick="showView('tPreguntas')">❓ Preguntas</button><button class="btn btn-outline" onclick="showView('tEvaluaciones')">📝 Evaluaciones</button><button class="btn btn-outline" onclick="showView('tResultados')">📊 Resultados</button></div></div><div class="page-card"><span class="section-eyebrow">Importante</span><p class="small muted">Todo lo que publiques debe tener un grado asignado para que llegue al grupo correcto.</p></div></div>`;
     (async()=>{try{const {data,error}=await supabaseClient.from('profiles').select('id,name,grade_id,section').eq('role','student').order('name');if(error)throw error;const rows=[];for(const g of GRADES){for(const s of SECTIONS){const n=(data||[]).filter(p=>p.grade_id===g.id&&p.section===s).length;rows.push(`<tr><td>${esc(g.name)}</td><td>${s}</td><td>${n}</td></tr>`)}}const total=(data||[]).length;v.querySelector('#teacherStudentStats').innerHTML=`<table class="datatable"><thead><tr><th>Grado</th><th>Sección</th><th>Estudiantes</th></tr></thead><tbody>${rows.join('')}</tbody><tfoot><tr><th colspan="2">Total general</th><th>${total}</th></tr></tfoot></table>`}catch(e){console.error('Student stats:',e);const el=v.querySelector('#teacherStudentStats');if(el)el.innerHTML='<span class="small muted">No se pudo consultar la cantidad de estudiantes.</span>'}})();
   }
 
@@ -807,7 +905,7 @@ document.getElementById('modalBackdrop').onclick=e=>{if(e.target.id==='modalBack
     }
   }
 
-  RENDERERS.tPreguntas=function(v){let sf='all',gf='all';const render=()=>{const rows=QUESTIONS.filter(q=>q.created_by===CURRENT_USER.id&&(sf==='all'||q.subject_id===sf)&&(gf==='all'||q.grade_id===gf));v.innerHTML=`<div class="breadcrumb">Docente / Banco de preguntas</div><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><h1>Banco de preguntas</h1><button class="btn btn-primary btn-sm" id="addQ">+ Crear pregunta</button></div><div class="tabs"><button class="tab ${sf==='all'?'active':''}" data-sf="all">Todas</button>${SUBJECTS.map(s=>`<button class="tab ${sf===s.id?'active':''}" data-sf="${s.id}">${esc(subjectIcon(s))} ${esc(s.name)}</button>`).join('')}</div><div class="field" style="max-width:260px"><label>Filtrar por grado</label><select id="gf"><option value="all">Todos los grados</option>${gradeOptionsStrict().replace('>',' selected>')}</select></div><div class="page-card"><div class="table-wrap"><table class="datatable"><thead><tr><th>Pregunta</th><th>Materia</th><th>Grado</th><th>Dificultad</th><th>Imagen</th><th></th></tr></thead><tbody>${rows.map(q=>`<tr><td>${esc((q.question||'').slice(0,80))}${(q.question||'').length>80?'…':''}</td><td>${esc(subjectById(q.subject_id)?.name||q.subject_id)}</td><td>${esc(gradeName(q.grade_id))}</td><td>${esc(q.difficulty)}</td><td>${q.image_url?'🖼️':'—'}</td><td class="row-actions"><button class="btn btn-ghost btn-sm" data-edit="${q.id}">Editar</button><button class="btn btn-danger btn-sm" data-del="${q.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div></div>`;const gs=v.querySelector('#gf');gs.value=gf;v.querySelectorAll('[data-sf]').forEach(b=>b.onclick=()=>{sf=b.dataset.sf;render()});gs.onchange=e=>{gf=e.target.value;render()};v.querySelector('#addQ').onclick=()=>openQuestionV4(null);v.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openQuestionV4(QUESTIONS.find(q=>q.id===b.dataset.edit)));v.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>runTeacherAction(async()=>{if(await confirmBox('Enviar a papelera','La pregunta permanecerá en papelera durante 30 días y luego deberá eliminarse definitivamente desde backend.')){const {error}=await supabaseClient.from('questions').update({deleted_at:new Date().toISOString(),deleted_by:CURRENT_USER.id}).eq('id',b.dataset.del).eq('created_by',CURRENT_USER.id);if(error)throw error;v4Toast('Pregunta enviada a papelera durante 30 días.')}},'No se pudo eliminar la pregunta.'))};render()}
+  RENDERERS.tPreguntas=function(v){let sf='all',gf='all';const render=()=>{const rows=QUESTIONS.filter(q=>q.created_by===CURRENT_USER.id&&(sf==='all'||q.subject_id===sf)&&(gf==='all'||q.grade_id===gf));v.innerHTML=`<div class="breadcrumb">Docente / Banco de preguntas</div><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><h1>Banco de preguntas</h1><button class="btn btn-primary btn-sm" id="addQ">+ Crear pregunta</button></div><div class="tabs"><button class="tab ${sf==='all'?'active':''}" data-sf="all">Todas</button>${SUBJECTS.map(s=>`<button class="tab ${sf===s.id?'active':''}" data-sf="${s.id}">${esc(subjectIcon(s))} ${esc(s.name)}</button>`).join('')}</div><div class="field" style="max-width:260px"><label>Filtrar por grado</label><select id="gf"><option value="all">Todos los grados</option>${gradeOptionsStrict().replace('>',' selected>')}</select></div><div class="page-card"><div class="table-wrap"><table class="datatable"><thead><tr><th>Pregunta</th><th>Materia</th><th>Grado</th><th>Dificultad</th><th>Imagen</th><th></th></tr></thead><tbody>${rows.map(q=>`<tr><td>${esc((q.question||'').slice(0,80))}${(q.question||'').length>80?'…':''}</td><td>${esc(subjectById(q.subject_id)?.name||q.subject_id)}</td><td>${esc(gradeName(q.grade_id))}</td><td>${esc(q.difficulty)}</td><td>${q.image_url?'🖼️':'—'}</td><td class="row-actions"><button class="btn btn-ghost btn-sm" data-edit="${q.id}">Editar</button><button class="btn btn-danger btn-sm" data-del="${q.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div></div>`;const gs=v.querySelector('#gf');gs.value=gf;v.querySelectorAll('[data-sf]').forEach(b=>b.onclick=()=>{sf=b.dataset.sf;render()});gs.onchange=e=>{gf=e.target.value;render()};v.querySelector('#addQ').onclick=()=>openQuestionV4(null);v.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openQuestionV4(QUESTIONS.find(q=>q.id===b.dataset.edit)));v.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>runTeacherAction(async()=>{if(await confirmBox('Eliminar pregunta','Esta pregunta dejará de estar disponible para tus estudiantes.')){const {error}=await supabaseClient.from('questions').update({deleted_at:new Date().toISOString(),deleted_by:CURRENT_USER.id}).eq('id',b.dataset.del);if(error)throw error;await reloadContent();render();v4Toast('Pregunta eliminada.')}},'No se pudo eliminar la pregunta.'))};render()}
   async function openQuestionV4(existing){
   openModal(`<h3>${existing?'Editar':'Crear'} pregunta</h3>
     <div class="field"><label>Materia</label><select id="qvSubject">${SUBJECTS.map(s=>`<option value="${esc(s.id)}" ${existing?.subject_id===s.id?'selected':''}>${esc(s.name)}</option>`).join('')}</select></div>
@@ -1092,10 +1190,52 @@ document.getElementById('modalBackdrop').onclick=e=>{if(e.target.id==='modalBack
 
   // ---- Theme button / logout / profile button rebound after overrides.
   document.getElementById('themeBtn').onclick=()=>{const cur=document.documentElement.getAttribute('data-theme');setTheme(cur==='dark'?'light':'dark')};
+  document.getElementById('publicThemeBtn')?.addEventListener('click',()=>{const cur=document.documentElement.getAttribute('data-theme');setTheme(cur==='dark'?'light':'dark')});
+
   document.getElementById('logoutBtn').onclick=logout;
-  document.getElementById('profileBtn').onclick=()=>showView(CURRENT_USER?.role==='teacher'?'tPerfil':'perfil');
+  document.getElementById('profileBtn').onclick=()=>showView(CURRENT_USER?.role==='student'?'perfil':'tPerfil');
 
   // ---- Mobile/routing friendly; keep session state through reload.
+
+
+  // ---- Subir a Supabase las preguntas de fábrica (preguntas_semilla.js).
+  // Usa el mismo upsert que el panel al crear una pregunta, con la sesión del docente/admin,
+  // así respeta las políticas (RLS) y los tipos de columnas que ya tengas. Ids fijos: repetir el
+  // proceso actualiza, no duplica.
+  async function uploadSeedToSupabase(btn,statusEl){
+    const setMsg=(t,err)=>{statusEl.innerHTML=`<div class="${err?'auth-error':'small muted'}" style="margin-top:8px">${esc(t)}</div>`};
+    btn.disabled=true;
+    try{
+      await reloadContent();
+      const seedTopics=TOPICS.filter(t=>t._seed), seedQs=QUESTIONS.filter(q=>q._seed);
+      if(!seedQs.length){setMsg('No hay preguntas de fábrica pendientes: ya están en Supabase.');return}
+      const tid=id=>String(id).replace('seed-topic-','st-');
+      const topicRows=seedTopics.map(t=>({id:tid(t.id),subject_id:t.subject_id,grade_id:t.grade_id,title:t.title,description:'',content:'',sort_order:0}));
+      const qRows=seedQs.map(q=>({id:String(q.id).replace('seed-question-','sq-'),subject_id:q.subject_id,grade_id:q.grade_id,topic_id:tid(q.topic_id),difficulty:q.difficulty,question:q.question,options:q.options,correct:q.correct,why:q.why||'',why_wrong:q.why_wrong||{},created_by:CURRENT_USER.id,image_url:null}));
+      const chunk=(arr,n)=>{const out=[];for(let i=0;i<arr.length;i+=n)out.push(arr.slice(i,i+n));return out};
+      let done=0;
+      for(const part of chunk(topicRows,100)){const {error}=await supabaseClient.from('topics').upsert(part,{onConflict:'id'});if(error)throw error}
+      for(const part of chunk(qRows,100)){const {error}=await supabaseClient.from('questions').upsert(part,{onConflict:'id'});if(error)throw error;done+=part.length;setMsg(`Subiendo… ${done}/${qRows.length}`)}
+      await reloadContent();
+      setMsg(`Listo: ${qRows.length} preguntas y ${topicRows.length} temas subidos a Supabase.`);
+    }catch(e){
+      console.error('Subida de preguntas:',e);
+      setMsg('No se pudo subir: '+(e?.message||'error desconocido')+(e?.hint?' · '+e.hint:''),true);
+    }finally{btn.disabled=false}
+  }
+  function addSeedUploadCard(v){
+    const box=document.createElement('div');
+    box.className='page-card';
+    box.style.marginTop='16px';
+    box.innerHTML='<span class="section-eyebrow">Preguntas de fábrica</span><p class="small muted">Sube a Supabase las preguntas que vienen con el código (6° a 11°) para poder verlas y editarlas desde tu panel. Puedes repetirlo sin miedo: no duplica.</p><button class="btn btn-primary btn-sm" id="uploadSeedBtn">⬆️ Subir preguntas a Supabase</button><div id="uploadSeedStatus"></div>';
+    v.appendChild(box);
+    const btn=box.querySelector('#uploadSeedBtn');
+    btn.onclick=()=>uploadSeedToSupabase(btn,box.querySelector('#uploadSeedStatus'));
+  }
+  const _tInicio=RENDERERS.tInicio;
+  RENDERERS.tInicio=function(v,p){const r=_tInicio.call(this,v,p);addSeedUploadCard(v);return r};
+  const _aInicio=RENDERERS.aInicio;
+  RENDERERS.aInicio=async function(v,p){const r=await _aInicio.call(this,v,p);addSeedUploadCard(v);return r};
 
   globalThis.authBoot=authBoot;
 })();
@@ -1147,11 +1287,19 @@ window.addEventListener('error',e=>console.error('Saber:',e.error||e.message));
   }
 
   function renderProfile(v){
-    const p=PROFILE||{}; const student=CURRENT_USER?.role==='student';
+    const p=PROFILE||{}; const student=CURRENT_USER?.role==='student'; const roleLabel=CURRENT_USER?.role==='admin'?'Administrador':(student?'Estudiante':'Docente');
     v.innerHTML=`
-      <div class="breadcrumb">${student?'Estudiante':'Docente'} / Perfil</div>
+      <div class="breadcrumb">${roleLabel} / Perfil</div>
       <h1>Mi perfil</h1>
-      <div class="page-card"><h2>${txt([p.first_name,p.last_name].filter(Boolean).join(' ')||p.name||'Usuario')}</h2><p class="muted">${txt(CURRENT_USER?.email||'')} · ${student?'Estudiante':'Docente'}</p></div>
+      <div class="page-card" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+        <div id="pfAvatarBox" style="width:64px;height:64px;border-radius:50%;overflow:hidden;background:var(--bg-2);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:1.4rem;flex-shrink:0"></div>
+        <div style="flex:1;min-width:200px">
+          <h2>${txt([p.first_name,p.last_name].filter(Boolean).join(' ')||p.name||'Usuario')}</h2>
+          <p class="muted">${txt(CURRENT_USER?.email||'')} · ${roleLabel}</p>
+          <button class="btn btn-outline btn-sm" id="pfChoosePhoto" type="button">Cambiar foto de perfil</button>
+          <input id="pfAvatarInput" type="file" accept="image/*" style="display:none">
+        </div>
+      </div>
       <div class="grid cols-2">
         <div class="page-card"><h3>Datos personales</h3>
           <div class="field"><label>Nombre</label><input id="pfFirst" value="${txt(p.first_name||'')}" maxlength="60"></div>
@@ -1165,6 +1313,26 @@ window.addEventListener('error',e=>console.error('Saber:',e.error||e.message));
         </div>
       </div>
       <div class="page-card"><h3>Seguridad</h3><p class="muted">Esta acción elimina tu cuenta.</p><button class="btn btn-danger btn-sm" id="pfDelete">Eliminar mi cuenta</button></div>`;
+    const avatarBox=v.querySelector('#pfAvatarBox');
+    if(p.avatar_url){getSignedUrl(BUCKETS.avatar,p.avatar_url).then(url=>{if(url)avatarBox.innerHTML=`<img alt="Foto de perfil" src="${url}" style="width:100%;height:100%;object-fit:cover">`;else avatarBox.textContent=(p.first_name||p.name||'U').charAt(0).toUpperCase()})}
+    else{avatarBox.textContent=(p.first_name||p.name||'U').charAt(0).toUpperCase()}
+    v.querySelector('#pfChoosePhoto').onclick=()=>v.querySelector('#pfAvatarInput').click();
+    v.querySelector('#pfAvatarInput').onchange=async e=>{
+      const f=e.target.files?.[0]; if(!f)return;
+      if(f.size>5*1024*1024){toastSafe('La foto debe pesar 5 MB o menos.','error');return}
+      try{
+        const ext=(f.name.split('.').pop()||'jpg').toLowerCase();
+        const path=`${CURRENT_USER.id}/avatar.${ext}`;
+        const {error}=await supabaseClient.storage.from(BUCKETS.avatar).upload(path,f,{upsert:true,contentType:f.type,cacheControl:'3600'});
+        if(error)throw error;
+        const {error:pErr}=await supabaseClient.from('profiles').update({avatar_url:path}).eq('id',CURRENT_USER.id);
+        if(pErr)throw pErr;
+        PROFILE={...PROFILE,avatar_url:path};
+        if(typeof updateSidebar==='function')updateSidebar();
+        renderProfile(v);
+        toastSafe('Foto de perfil actualizada.','success');
+      }catch(err){console.error(err);toastSafe('No se pudo guardar la foto de perfil.','error')}
+    };
     v.querySelector('#pfSave').onclick=async()=>{
       try{
         const first=v.querySelector('#pfFirst').value.trim(), last=v.querySelector('#pfLast').value.trim();
@@ -1259,109 +1427,10 @@ window.addEventListener('error',e=>console.error('Saber:',e.error||e.message));
     (async()=>{try{const {data,error}=await supabaseClient.from('learning_resources').select('*').is('deleted_at',null).order('created_at',{ascending:false});if(error)throw error;const body=v.querySelector('#materialCleanBody');body.innerHTML=(data||[]).map(r=>`<div style="padding:12px 0;border-bottom:1px solid var(--line)"><h3>${txt(r.title)}</h3><p class="muted">${txt(r.description||'')}</p>${r.url?`<a href="${txt(r.url)}" target="_blank" rel="noopener">Abrir recurso</a>`:''}${r.file_url?`<a href="${txt(r.file_url)}" target="_blank" rel="noopener">Abrir archivo</a>`:''}</div>`).join('')||'<p>No hay recursos disponibles.</p>'}catch(e){fail(v,'No se pudieron cargar los archivos.',e)}})();
   }
 
-  /* =======================================================
-     GRUPOS DOCENTES — restaurados como en la versión anterior.
-     ======================================================= */
-  let TEACHER_GROUPS=[];
-  const SECTION_CODES=['A','B','C','D'];
-  function groupKey(grade_id,section){return `${grade_id}::${section}`;}
-  function groupAllowed(grade_id,section){return TEACHER_GROUPS.some(g=>g.grade_id===grade_id&&g.section===section);}
-  function sectionsForGrade(grade_id){return [...new Set(TEACHER_GROUPS.filter(g=>g.grade_id===grade_id).map(g=>g.section))];}
-  function teacherSectionsHtml(grade_id,selected=[]){const allowed=sectionsForGrade(grade_id);if(!allowed.length)return '<div class="empty-state small">Primero asigna este grado a uno de tus grupos.</div>';return `<div class="field"><label>Secciones disponibles para este contenido</label><div class="grid cols-2" id="sectionPicker">${allowed.map(s=>`<label style="display:flex;gap:8px;align-items:center;padding:8px;border:1px solid var(--line);border-radius:10px"><input type="checkbox" value="${s}" ${selected.includes(s)?'checked':''} style="width:auto"> <span>${s}</span></label>`).join('')}</div><p class="small muted">Un mismo contenido puede estar disponible para varias secciones.</p></div>`;}
-  function selectedSectionsFrom(container){return [...container.querySelectorAll('#sectionPicker input:checked')].map(x=>x.value);}
-  async function loadTeacherGroups(){if(CURRENT_USER?.role!=='teacher'){TEACHER_GROUPS=[];return}const {data,error}=await supabaseClient.from('teacher_groups').select('*').eq('teacher_id',CURRENT_USER.id).order('grade_id').order('section');if(error)throw error;TEACHER_GROUPS=data||[];}
-  async function saveTeacherGroups(selected){
-    if(CURRENT_USER?.role!=='teacher')throw new Error('Solo un docente puede administrar sus grupos.');
-    const {error:delError}=await supabaseClient.from('teacher_groups').delete().eq('teacher_id',CURRENT_USER.id);
-    if(delError)throw delError;
-    if(selected.length){
-      const rows=selected.map(x=>({teacher_id:CURRENT_USER.id,grade_id:x.grade_id,section:x.section}));
-      const {error}=await supabaseClient.from('teacher_groups').insert(rows);
-      if(error)throw error;
-    }
-    await loadTeacherGroups();
-    await logTeacherActivity('Actualizó sus grupos','teacher_groups',CURRENT_USER.id,{groups:selected});
-  }
-
-  RENDERERS.tGrupos=async function(v){
-    await loadTeacherGroups();
-    const selected=new Set(TEACHER_GROUPS.map(g=>groupKey(g.grade_id,g.section)));
-    const rows=GRADES.flatMap(g=>SECTION_CODES.map(section=>({grade:g,section,checked:selected.has(groupKey(g.id,section))})));
-    v.innerHTML=`<div class="breadcrumb">Docente / Mis grupos</div>
-      <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap">
-        <div><h1>Mis grupos</h1><p class="muted">El docente solamente trabaja con los grupos que tiene asignados.</p></div>
-        <button class="btn btn-primary btn-sm" id="saveGroups">Guardar grupos</button>
-      </div>
-      <div class="page-card"><div class="grid cols-3" id="groupsGrid">
-        ${rows.map(r=>`<label class="list-card" style="display:flex;gap:10px;align-items:center;cursor:pointer">
-          <input type="checkbox" data-grade="${esc(r.grade.id)}" data-section="${r.section}" ${r.checked?'checked':''} style="width:auto">
-          <span><b>${esc(r.grade.name)} ${r.section}</b></span>
-        </label>`).join('')}
-      </div></div>
-      <div class="page-card"><h3>Resumen</h3><div id="groupSummary" class="table-wrap"></div></div>`;
-    const renderSummary=async()=>{
-      const {data,error}=await supabaseClient.from('profiles').select('id,name,grade_id,section').eq('role','student');
-      if(error)throw error;
-      const current=TEACHER_GROUPS;
-      v.querySelector('#groupSummary').innerHTML=`<table class="datatable"><thead><tr><th>Grupo</th><th>Estudiantes</th></tr></thead><tbody>${
-        current.map(g=>`<tr><td>${esc(gradeName(g.grade_id))} ${g.section}</td><td>${(data||[]).filter(p=>p.grade_id===g.grade_id&&p.section===g.section).length}</td></tr>`).join('')
-      }${!current.length?'<tr><td colspan="2">Todavía no tienes grupos asignados.</td></tr>':''}</tbody></table>`;
-    };
-    await renderSummary();
-    v.querySelector('#saveGroups').onclick=()=>runTeacherAction(async()=>{
-      const selected=[...v.querySelectorAll('#groupsGrid input:checked')].map(x=>({grade_id:x.dataset.grade,section:x.dataset.section}));
-      if(!selected.length){v4Toast('Selecciona al menos un grupo.','error');return}
-      await saveTeacherGroups(selected);
-      renderNav();
-      await renderSummary();
-      v4Toast('Mis grupos se actualizaron correctamente.');
-    },'No se pudieron guardar tus grupos.');
-  };
-
-  /* =======================================================
-     INICIO DOCENTE: solo grupos propios + actividad real
-     ======================================================= */
-  RENDERERS.tInicio=async function(v){
-    await loadTeacherGroups();
-    const {data:students,error}=await supabaseClient.from('profiles').select('id,name,grade_id,section').eq('role','student').order('name');
-    if(error)throw error;
-    const mine=(students||[]).filter(p=>groupAllowed(p.grade_id,p.section));
-    const recent=await supabaseClient.from('teacher_activity').select('*').eq('user_id',CURRENT_USER.id).order('created_at',{ascending:false}).limit(8);
-    const recentRows=recent.data||[];
-    v.innerHTML=`<div class="breadcrumb">Panel docente</div><h1>¡Hola, ${esc(PROFILE?.name||'profe')}!</h1>
-      <p class="muted">Administra únicamente tus grupos y tu contenido.</p>
-      <div class="grid cols-4" style="margin:18px 0">
-        <div class="stat-card"><div class="sval">${TEACHER_GROUPS.length}</div><div class="slabel">Mis grupos</div></div>
-        <div class="stat-card"><div class="sval">${mine.length}</div><div class="slabel">Mis estudiantes</div></div>
-        <div class="stat-card"><div class="sval">${QUESTIONS.filter(q=>q.created_by===CURRENT_USER.id&&q.deleted_at==null).length}</div><div class="slabel">Mis preguntas</div></div>
-        <div class="stat-card"><div class="sval">${TOPICS.filter(t=>t.created_by===CURRENT_USER.id).length}</div><div class="slabel">Mis temas</div></div>
-      </div>
-      <div class="page-card"><span class="section-eyebrow">Mis grupos</span><div class="table-wrap"><table class="datatable"><thead><tr><th>Grado</th><th>Sección</th><th>Estudiantes</th><th></th></tr></thead><tbody>
-      ${TEACHER_GROUPS.map(g=>`<tr><td>${esc(gradeName(g.grade_id))}</td><td>${g.section}</td><td>${mine.filter(p=>p.grade_id===g.grade_id&&p.section===g.section).length}</td><td><button class="btn btn-outline btn-sm" data-group="${esc(g.grade_id)}|${g.section}">Ver estudiantes</button></td></tr>`).join('')||'<tr><td colspan="4">No tienes grupos asignados.</td></tr>'}
-      </tbody></table></div></div>
-      <div class="grid cols-2">
-        <div class="page-card"><span class="section-eyebrow">Accesos rápidos</span><div class="row-actions">
-          <button class="btn btn-outline" onclick="showView('tGrupos')">Mis grupos</button>
-          <button class="btn btn-outline" onclick="showView('tTemas')">Temas</button>
-          
-          <button class="btn btn-outline" onclick="showView('tPreguntas')">Preguntas</button>
-          <button class="btn btn-outline" onclick="showView('tMaterial')">Materiales</button>
-          
-        </div></div>
-        <div class="page-card"><span class="section-eyebrow">Actividad reciente</span>
-          ${recentRows.length?recentRows.map(a=>`<div style="padding:8px 0;border-bottom:1px solid var(--line)"><b>${esc(a.action)}</b><div class="small muted">${new Date(a.created_at).toLocaleString('es-CO')}</div></div>`).join(''):'<div class="small muted">Aún no hay actividad registrada.</div>'}
-        </div>
-      </div>`;
-    v.querySelectorAll('[data-group]').forEach(b=>b.onclick=()=>{
-      const [grade_id,section]=b.dataset.group.split('|');
-      showView('tResultados',{grade_id,section});
-    });
-  };
-
 
   // Navegación final, sin duplicados.
   STUDENT_NAV.splice(0,STUDENT_NAV.length,['inicio','🏠','Inicio'],['materias','📚','Mis materias'],['repaso','🔁','Repasar errores'],['simulacro','⏱️','Simulacro Saber 11'],['progreso','📈','Progreso'],['logros','🏆','Logros'],['perfil','👤','Perfil']);
-  TEACHER_NAV.splice(0,TEACHER_NAV.length,['tInicio','🏠','Inicio'],['tGrupos','👥','Mis grupos'],['tTemas','🧠','Temas'],['tPapelera','🗑️','Papelera'],['tMaterial','📄','Archivos'],['tPreguntas','❓','Banco de preguntas'],['tEvaluaciones','📝','Tests y evaluaciones'],['tSimulacros','⏱️','Simulacros'],['tResultados','📊','Resultados'],['tPerfil','👤','Perfil']);
+  TEACHER_NAV.splice(0,TEACHER_NAV.length,['tInicio','🏠','Inicio'],['tTemas','🧠','Temas'],['tPreguntas','❓','Banco de preguntas'],['tEvaluaciones','📝','Tests y evaluaciones'],['tSimulacros','⏱️','Simulacros'],['tResultados','📊','Resultados'],['tPerfil','👤','Perfil']);
 
   RENDERERS.perfil=renderProfile;
   RENDERERS.tPerfil=renderProfile;
@@ -1369,11 +1438,96 @@ window.addEventListener('error',e=>console.error('Saber:',e.error||e.message));
   RENDERERS.tSimulacros=renderSim;
   RENDERERS.tMaterial=renderMaterial;
 
+  async function fetchAllProfiles(){
+    const {data,error}=await supabaseClient.from('profiles').select('*').order('name',{ascending:true});
+    if(error)throw error;
+    return data||[];
+  }
+
+  async function renderAdminInicio(v){
+    v.innerHTML=`<div class="breadcrumb">Administración / Inicio</div><h1>Panel de administración</h1><div id="aStats" class="grid cols-2"><p class="muted">Cargando…</p></div>`;
+    try{
+      const profiles=await fetchAllProfiles();
+      const teachers=profiles.filter(p=>p.role==='teacher');
+      const students=profiles.filter(p=>p.role==='student');
+      const admins=profiles.filter(p=>p.role==='admin');
+      const pending=teachers.filter(p=>p.approved===false);
+      const disabled=profiles.filter(p=>p.disabled);
+      const stat=(label,value)=>`<div class="page-card"><p class="muted small">${esc(label)}</p><h2>${value}</h2></div>`;
+      v.querySelector('#aStats').innerHTML=
+        stat('Docentes',teachers.length)+stat('Estudiantes',students.length)+
+        stat('Administradores',admins.length)+stat('Preguntas en el banco',QUESTIONS.length)+
+        stat('Temas creados',TOPICS.length)+stat('Cuentas deshabilitadas',disabled.length);
+      if(pending.length){
+        v.insertAdjacentHTML('beforeend',`<div class="page-card" style="border-color:var(--warn);margin-top:14px"><h3>⚠️ ${pending.length} docente(s) pendiente(s) de aprobación</h3><button class="btn btn-primary btn-sm" id="aGoPending">Ver en Usuarios</button></div>`);
+        v.querySelector('#aGoPending').onclick=()=>showView('aUsuarios',{filter:'pending'});
+      }
+    }catch(e){fail(v,'No se pudo cargar el panel de administración.',e)}
+  }
+
+  async function renderAdminUsuarios(v,params={}){
+    v.innerHTML=`<div class="breadcrumb">Administración / Usuarios</div><h1>Usuarios</h1>
+      <div class="field" style="max-width:320px"><input id="aSearch" placeholder="Buscar por nombre…"></div>
+      <div id="aUserList" class="grid cols-1" style="margin-top:10px"><p class="muted">Cargando…</p></div>`;
+    let profiles=[];
+    try{ profiles=await fetchAllProfiles(); }catch(e){ fail(v,'No se pudo cargar la lista de usuarios.',e); return; }
+    const list=v.querySelector('#aUserList');
+    function row(p){
+      const roleName={student:'Estudiante',teacher:'Docente',admin:'Administrador'}[p.role]||p.role;
+      const estado=p.disabled?'<span style="color:var(--danger)">Deshabilitada</span>':(p.role==='teacher'&&p.approved===false)?'<span style="color:var(--warn)">Pendiente</span>':'<span style="color:var(--ok)">Activa</span>';
+      const extra=p.role==='student'?`Grado ${esc(gradeLabel(p.grade_id))}${p.section?(' · Sección '+esc(p.section)):''}`:(p.role==='teacher'?`Materia: ${esc((SUBJECTS.find(s=>s.id===p.teacher_subject_id)||{}).name||'Sin definir')}`:'');
+      return `<div class="page-card" data-uid="${esc(p.id)}" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between">
+        <div><b>${esc(p.name||[p.first_name,p.last_name].filter(Boolean).join(' ')||'Sin nombre')}</b><br><span class="small muted">${extra}</span></div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <span class="small">${estado}</span>
+          <select class="roleSel" style="font-size:.8rem">
+            <option value="student" ${p.role==='student'?'selected':''}>Estudiante</option>
+            <option value="teacher" ${p.role==='teacher'?'selected':''}>Docente</option>
+            <option value="admin" ${p.role==='admin'?'selected':''}>Administrador</option>
+          </select>
+          ${p.role==='teacher'&&p.approved===false?'<button class="btn btn-primary btn-sm approveBtn">Aprobar</button>':''}
+          <button class="btn btn-outline btn-sm toggleDisabledBtn">${p.disabled?'Habilitar':'Deshabilitar'}</button>
+        </div></div>`;
+    }
+    function paint(filterText,onlyPending){
+      const q=(filterText||'').trim().toLowerCase();
+      const filtered=profiles.filter(p=>{
+        const name=(p.name||[p.first_name,p.last_name].filter(Boolean).join(' ')||'').toLowerCase();
+        if(onlyPending)return p.role==='teacher'&&p.approved===false;
+        return !q||name.includes(q);
+      });
+      list.innerHTML=filtered.length?filtered.map(row).join(''):'<p class="muted">No hay usuarios que coincidan.</p>';
+      list.querySelectorAll('[data-uid]').forEach(card=>{
+        const uid=card.dataset.uid; const p=profiles.find(x=>x.id===uid);
+        card.querySelector('.roleSel').onchange=async e=>{
+          const newRole=e.target.value;
+          if(!await confirmBox('Cambiar rol',`¿Cambiar el rol de ${p.name||'este usuario'} a ${newRole}?`)){e.target.value=p.role;return}
+          try{const {error}=await supabaseClient.from('profiles').update({role:newRole}).eq('id',uid);if(error)throw error;p.role=newRole;toastSafe('Rol actualizado.','success');paint(v.querySelector('#aSearch').value,false)}catch(err){toastSafe('No se pudo cambiar el rol.','error');console.error(err)}
+        };
+        const appBtn=card.querySelector('.approveBtn');
+        if(appBtn)appBtn.onclick=async()=>{
+          try{const {error}=await supabaseClient.from('profiles').update({approved:true}).eq('id',uid);if(error)throw error;p.approved=true;toastSafe('Docente aprobado.','success');paint(v.querySelector('#aSearch').value,false)}catch(err){toastSafe('No se pudo aprobar la cuenta.','error');console.error(err)}
+        };
+        card.querySelector('.toggleDisabledBtn').onclick=async()=>{
+          const next=!p.disabled;
+          if(!await confirmBox(next?'Deshabilitar cuenta':'Habilitar cuenta',`¿${next?'Deshabilitar':'Habilitar'} la cuenta de ${p.name||'este usuario'}?`))return;
+          try{const {error}=await supabaseClient.from('profiles').update({disabled:next}).eq('id',uid);if(error)throw error;p.disabled=next;toastSafe(next?'Cuenta deshabilitada.':'Cuenta habilitada.','success');paint(v.querySelector('#aSearch').value,false)}catch(err){toastSafe('No se pudo actualizar la cuenta.','error');console.error(err)}
+        };
+      });
+    }
+    v.querySelector('#aSearch').oninput=e=>paint(e.target.value,false);
+    paint('',params?.filter==='pending');
+  }
+
+  RENDERERS.aInicio=renderAdminInicio;
+  RENDERERS.aUsuarios=renderAdminUsuarios;
+
   // Importante: el showView final solo enruta; cada renderer controla sus propios errores.
   const baseShow=showView;
   showView=function(id,params={}){
-    if(CURRENT_USER?.role==='teacher'&&id==='perfil')id='tPerfil';
+    if((CURRENT_USER?.role==='teacher'||CURRENT_USER?.role==='admin')&&id==='perfil')id='tPerfil';
     if(CURRENT_USER?.role==='student'&&id==='tPerfil')id='perfil';
+    try{sessionStorage.setItem('parche_saber_last_view_v4',id);sessionStorage.setItem('parche_saber_last_params_v4',JSON.stringify(params||{}))}catch{}
     return baseShow(id,params);
   };
   globalThis.showView=showView;
