@@ -58,6 +58,12 @@
     </section>
     <section class="auth-panel" aria-label="Acceso a Parche Saber">
       <div class="public-theme-row"><span class="small muted">Apariencia</span><button id="publicThemeBtn" class="theme-switch" type="button" aria-label="Cambiar tema"><span class="theme-switch-icon">☼</span><span id="publicThemeLabel">Claro</span></button></div>
+      <!-- ACCESO DE PRUEBA TEMPORAL: quitar este bloque cuando terminemos las pruebas -->
+      <div id="devTestAccess" style="display:flex;gap:8px;margin:0 0 14px;padding:10px;border:1px dashed #f59e0b;border-radius:10px;background:rgba(245,158,11,.08)">
+        <button type="button" id="devTestTeacher" class="btn btn-block" style="font-size:.8rem">🧪 Entrar como docente</button>
+        <button type="button" id="devTestStudent" class="btn btn-block" style="font-size:.8rem">🧪 Entrar como estudiante</button>
+        <button type="button" id="devTestAdmin" class="btn btn-block" style="font-size:.8rem">🧪 Entrar como admin</button>
+      </div>
       <div class="auth-panel-heading"><span class="section-eyebrow">Bienvenido</span><h2>Entra a tu cuenta</h2><p class="muted">Continúa donde lo dejaste o crea tu espacio de estudio.</p></div>
       <div class="auth-tabs" role="tablist" aria-label="Acceso"><button class="auth-tab active" id="tabLogin" type="button" role="tab">Iniciar sesión</button><button class="auth-tab" id="tabRegister" type="button" role="tab">Crear cuenta</button></div>
       <form id="loginForm"><div id="loginError"></div><div class="field"><label for="loginEmail">Correo electrónico</label><input id="loginEmail" type="email" autocomplete="username" placeholder="tu-correo@ejemplo.com" required></div><div class="field"><label for="loginPassword">Contraseña</label><div class="password-field"><input id="loginPassword" type="password" autocomplete="current-password" placeholder="Tu contraseña" required><button type="button" class="password-toggle" data-toggle-password="loginPassword" aria-label="Mostrar contraseña">👁</button></div></div><button class="btn btn-primary btn-block auth-submit" type="submit">Iniciar sesión <span>→</span></button><div class="auth-links"><button type="button" class="linkbtn" id="forgotPasswordBtn">¿Olvidaste tu contraseña?</button></div></form>
@@ -72,8 +78,8 @@
 <div id="toastStack" class="toast-stack"></div>
 
 <script src="./config.js"></script>
-<script src="./preguntas_semilla.js?v=2"></script>
-<script src="./app.js?v=12"></script>
+<script src="./preguntas_semilla.js"></script>
+<script src="./app.js?v=10"></script>
 <script src="./mobile-menu.js?v=7"></script>
 </body>
 </html>
