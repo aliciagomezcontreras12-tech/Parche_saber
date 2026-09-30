@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Parche Saber · Plataforma educativa</title>
+<meta name="description" content="Parche Saber: plataforma de estudio con Supabase para estudiantes y docentes.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.4/dist/jspdf.plugin.autotable.min.js"></script>
+<link rel="stylesheet" href="./styles.css?v=10">
+</head>
+<body class="auth-active">
+
+<!-- ☰ Botón hamburguesa: fuera de #app para que nunca quede oculto por .hidden -->
+<button id="navMobileBtn" class="iconbtn" type="button" aria-label="Abrir menú" aria-expanded="false">☰</button>
+
+<!-- Overlay oscuro al abrir el sidebar en móvil -->
+<div id="sidebarOverlay"></div>
+
+<!-- Sidebar: también fuera de #app para que no herede display:none -->
+<div id="appShell">
+  <aside id="sidebar">
+    <button id="sidebarCloseBtn" class="iconbtn" type="button" aria-label="Cerrar menú">✕</button>
+    <div class="brand"><div class="badge">🎒</div><div><h1>Parche Saber</h1><span class="eyebrow">Tu parche pa'l Saber 11°</span></div></div>
+    <div class="role-flag" id="roleFlag">Estudiante</div>
+    <div id="navList"></div>
+    <button class="logoutBtn" id="logoutBtn">⏻ Cerrar sesión</button>
+  </aside>
+
+  <div id="app" class="hidden">
+    <main id="main">
+      <div class="topbar">
+        <button id="navMobileBtnSpacer" class="iconbtn" style="visibility:hidden;pointer-events:none" aria-hidden="true">☰</button>
+        <div class="searchbox"><span class="search-icon">🔎</span><input id="globalSearch" placeholder="Buscar materias, temas, preguntas, tests…"><div id="searchResults"></div></div>
+        <button id="themeBtn" class="iconbtn">Tema: Claro</button>
+        <button id="profileBtn" class="profile-chip"><span id="topAvatar" class="pc-avatar">E</span><span><span id="topName" class="pc-name">Usuario</span><br><span id="topRole" class="pc-level">Estudiante</span></span></button>
+      </div>
+      <div id="viewsHost"></div>
+    </main>
+  </div>
+</div>
+
+<div id="authScreen">
+  <div class="auth-shell">
+    <section class="auth-hero" aria-label="Presentación de Parche Saber">
+      <div class="auth-hero-top">
+        <div class="brand-lockup"><div class="brand-mark" aria-hidden="true"><span class="brand-mark-dot"></span><span class="brand-mark-line"></span></div><div><div class="brand-kicker">PLATAFORMA EDUCATIVA</div><div class="brand-name">Parche Saber</div></div></div>
+        <span class="hero-status"><span></span> Aprende · practica · avanza</span>
+      </div>
+      <div class="hero-copy"><div class="hero-eyebrow">Tu espacio para el Saber 11°</div><h1>Aprende a tu ritmo.<br><em>Prepárate mejor.</em></h1><p>Estudia contenidos, practica preguntas y sigue tu progreso en un solo lugar.</p></div>
+      <div class="subject-pills" aria-label="Materias"><span>Matemáticas</span><span>Lectura Crítica</span><span>Ciencias Naturales</span><span>Sociales y Ciudadanas</span></div>
+      <div class="hero-features"><div><span class="feature-icon">01</span><div><b>Contenido organizado</b><small>Materias, temas, preguntas y materiales.</small></div></div><div><span class="feature-icon">02</span><div><b>Práctica con retroalimentación</b><small>Tests, evaluaciones y simulacros.</small></div></div><div><span class="feature-icon">03</span><div><b>Progreso personal</b><small>Guarda tus avances y continúa cuando quieras.</small></div></div></div>
+      <div class="hero-footer"><span>Diseñado para estudiar con claridad.</span><span class="hero-footer-rule"></span><span>Parche Saber</span></div>
+    </section>
+    <section class="auth-panel" aria-label="Acceso a Parche Saber">
+      <div class="public-theme-row"><span class="small muted">Apariencia</span><button id="publicThemeBtn" class="theme-switch" type="button" aria-label="Cambiar tema"><span class="theme-switch-icon">☼</span><span id="publicThemeLabel">Claro</span></button></div>
+      <div class="auth-panel-heading"><span class="section-eyebrow">Bienvenido</span><h2>Entra a tu cuenta</h2><p class="muted">Continúa donde lo dejaste o crea tu espacio de estudio.</p></div>
+      <div class="auth-tabs" role="tablist" aria-label="Acceso"><button class="auth-tab active" id="tabLogin" type="button" role="tab">Iniciar sesión</button><button class="auth-tab" id="tabRegister" type="button" role="tab">Crear cuenta</button></div>
+      <form id="loginForm"><div id="loginError"></div><div class="field"><label for="loginEmail">Correo electrónico</label><input id="loginEmail" type="email" autocomplete="username" placeholder="tu-correo@ejemplo.com" required></div><div class="field"><label for="loginPassword">Contraseña</label><div class="password-field"><input id="loginPassword" type="password" autocomplete="current-password" placeholder="Tu contraseña" required><button type="button" class="password-toggle" data-toggle-password="loginPassword" aria-label="Mostrar contraseña">👁</button></div></div><button class="btn btn-primary btn-block auth-submit" type="submit">Iniciar sesión <span>→</span></button><div class="auth-links"><button type="button" class="linkbtn" id="forgotPasswordBtn">¿Olvidaste tu contraseña?</button></div></form>
+      <form id="registerForm" class="hidden"><div id="registerError"></div><div class="field"><label>Tipo de cuenta</label><div class="role-picker"><button type="button" class="role-opt active" data-role="student"><span>🎓</span> Estudiante</button><button type="button" class="role-opt" data-role="teacher"><span>👩🏫</span> Docente</button></div></div><div class="grid cols-2"><div class="field"><label for="regName">Nombre</label><input id="regName" maxlength="40" autocomplete="given-name" placeholder="Tu nombre" required></div><div class="field"><label for="regLastName">Apellido</label><input id="regLastName" maxlength="40" autocomplete="family-name" placeholder="Tu apellido" required></div></div><div class="field"><label for="regEmail">Correo electrónico</label><input id="regEmail" type="email" autocomplete="email" placeholder="tu-correo@ejemplo.com" required></div><div class="field"><label for="regPassword">Contraseña</label><div class="password-field"><input id="regPassword" type="password" minlength="8" autocomplete="new-password" placeholder="Crea una contraseña segura" required><button type="button" class="password-toggle" data-toggle-password="regPassword" aria-label="Mostrar contraseña">👁</button></div><div id="regPasswordHint" class="password-hint">Mínimo 8 caracteres, una mayúscula, una minúscula y un número.</div></div><div id="studentRegisterFields" class="student-register-fields"><div class="grid cols-2"><div class="field"><label for="regGrade">Grado</label><select id="regGrade"></select></div><div class="field"><label for="regSection">Sección</label><select id="regSection"><option value="">Selecciona una sección</option><option value="A">A</option><option value="B">B</option><option value="C">C</option><option value="D">D</option></select></div></div></div><div id="teacherRegisterFields" class="student-register-fields hidden"><div class="field"><label for="regTeacherSubject">Materia que enseñas</label><select id="regTeacherSubject"></select></div><div class="field"><label>Grados que manejas</label><div id="regTeacherGrades" class="checkbox-grid"></div></div><div class="field"><label>Secciones que manejas</label><div class="checkbox-grid"><label class="checkbox-opt"><input type="checkbox" value="A"> A</label><label class="checkbox-opt"><input type="checkbox" value="B"> B</label><label class="checkbox-opt"><input type="checkbox" value="C"> C</label><label class="checkbox-opt"><input type="checkbox" value="D"> D</label></div></div></div><button class="btn btn-primary btn-block auth-submit" type="submit">Crear mi cuenta <span>→</span></button></form>
+      <p class="auth-privacy">Al continuar, tus datos académicos se gestionan de forma separada por usuario y rol.</p>
+    </section>
+  </div>
+</div>
+
+<div id="modalBackdrop" class="modal-backdrop"><div id="modalBox" class="modal-box"></div></div>
+<div id="notifyBackdrop" class="notify-backdrop"><div id="notifyBox" class="notify-box"></div></div>
+<div id="toastStack" class="toast-stack"></div>
+
+<script src="./config.js"></script>
+<script src="./preguntas_semilla.js"></script>
+<script src="./app.js?v=10"></script>
+<script src="./mobile-menu.js?v=7"></script>
+</body>
+</html>
