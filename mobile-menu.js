@@ -1,7 +1,8 @@
 // mobile-menu.js v7
 (function () {
   'use strict';
-
+  
+  function gradeName(id){ return (GRADES.find(x => x.id === id)?.name) || id || ''; }
   var btn = document.getElementById('navMobileBtn');
   var overlay = document.getElementById('sidebarOverlay');
   var sidebar = document.getElementById('sidebar');
